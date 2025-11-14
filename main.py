@@ -1,9 +1,11 @@
 import os
+import base64
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from typing import Optional, List
 from hashlib import sha256
+import requests
 
 from database import db, create_document, get_documents
 from schemas import Generation
@@ -78,6 +80,7 @@ def test_database():
 
     response["database_url"] = "✅ Set" if os.getenv("DATABASE_URL") else "❌ Not Set"
     response["database_name"] = "✅ Set" if os.getenv("DATABASE_NAME") else "❌ Not Set"
+    response["stability_key"] = "✅ Set" if os.getenv("STABILITY_API_KEY") else "❌ Not Set"
     return response
 
 
@@ -106,6 +109,46 @@ def build_enhanced_prompt(req: EnhanceRequest) -> str:
     return " ".join(enhanced.split())
 
 
+def generate_with_stability(enhanced_prompt: str, width: int = 768, height: int = 1024) -> Optional[str]:
+    """Generate an image using Stability AI REST API. Returns data URL if successful, else None."""
+    api_key = os.getenv("STABILITY_API_KEY")
+    if not api_key:
+        return None
+    try:
+        url = "https://api.stability.ai/v1/generation/stable-diffusion-xl-1024-v1-0/text-to-image"
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+        }
+        payload = {
+            "text_prompts": [
+                {"text": enhanced_prompt, "weight": 1.0},
+                {"text": "low quality, blurry, distorted, deformed, extra fingers, watermark, text", "weight": -1.2},
+            ],
+            "cfg_scale": 7,
+            "clip_guidance_preset": "FAST_BLUE",
+            "sampler": "K_DPM_2_ANCESTRAL",
+            "samples": 1,
+            "steps": 35,
+            "width": width,
+            "height": height,
+        }
+        resp = requests.post(url, headers=headers, json=payload, timeout=60)
+        if resp.status_code != 200:
+            return None
+        data = resp.json()
+        artifacts = data.get("artifacts") or []
+        if not artifacts:
+            return None
+        b64 = artifacts[0].get("base64")
+        if not b64:
+            return None
+        return f"data:image/png;base64,{b64}"
+    except Exception:
+        return None
+
+
 @app.post("/api/enhance", response_model=EnhanceResponse)
 def enhance(req: EnhanceRequest):
     enhanced_prompt = build_enhanced_prompt(req)
@@ -117,12 +160,14 @@ def generate(req: GenerateRequest):
     # Build or use enhanced prompt
     enhanced_prompt = req.enhanced_prompt or build_enhanced_prompt(req)
 
-    # Demo image generation strategy: use deterministic placeholder from picsum with a seed
-    seed = sha256(enhanced_prompt.encode("utf-8")).hexdigest()[:16]
-    width = 768
-    height = 1024
-    # Using picsum seeded image as placeholder; in production, call a real image gen provider here
-    image_url = f"https://picsum.photos/seed/{seed}/{width}/{height}"
+    # Try real image generation first (Stability AI). Falls back to placeholder if not configured.
+    width, height = 768, 1024
+    image_url = generate_with_stability(enhanced_prompt, width=width, height=height)
+
+    if not image_url:
+        # Fallback demo image generation strategy: deterministic placeholder from picsum with a seed
+        seed = sha256(enhanced_prompt.encode("utf-8")).hexdigest()[:16]
+        image_url = f"https://picsum.photos/seed/{seed}/{width}/{height}"
 
     # Persist to database
     try:
