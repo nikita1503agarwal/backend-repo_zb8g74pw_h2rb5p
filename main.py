@@ -84,14 +84,43 @@ def test_database():
     return response
 
 
+def coerce_adult_age(age: Optional[str]) -> str:
+    # Ensure we always prompt for an adult subject
+    if not age:
+        return "mid 20s"
+    try:
+        # If numeric, ensure >= 18
+        n = int(''.join([c for c in age if c.isdigit()]))
+        return f"{max(n, 20)}"
+    except Exception:
+        # textual ages like 'early 20s' pass through if adult-ish, else coerce
+        text = age.lower()
+        if any(k in text for k in ["teen", "child", "kid", "girl", "boy", "minor", "under"]):
+            return "mid 20s"
+        return age
+
+
 def build_enhanced_prompt(req: EnhanceRequest) -> str:
     base = req.prompt.strip()
     if not base:
         raise HTTPException(status_code=400, detail="Prompt cannot be empty")
 
+    # Strengthen subject to avoid random objects/backgrounds and ensure adult subject
+    age_text = coerce_adult_age(req.age)
+
+    # If user asked for a "girl" or ambiguous, steer to adult woman to be safe and on-target
+    subj_prefix = "solo portrait of an adult woman"
+    base_lower = base.lower()
+    if any(k in base_lower for k in ["man", "male", "boy", "guy"]):
+        subj_prefix = "solo portrait of an adult man"
+    if any(k in base_lower for k in ["woman", "female", "lady"]):
+        subj_prefix = "solo portrait of an adult woman"
+    if any(k in base_lower for k in ["girl"]):
+        subj_prefix = "solo portrait of an adult woman"  # safety: avoid minors
+
     details = []
-    if req.age:
-        details.append(f"age: {req.age}")
+    if age_text:
+        details.append(f"age: {age_text}")
     if req.skin_tone:
         details.append(f"skin tone: {req.skin_tone}")
     if req.eye_color:
@@ -100,13 +129,24 @@ def build_enhanced_prompt(req: EnhanceRequest) -> str:
         details.append(f"nationality: {req.nationality}")
 
     guide = (
-        "ultra-realistic portrait, 85mm lens, shallow depth of field, soft natural lighting, high dynamic range, "
-        "detailed skin texture, cinematic color grading, volumetric light, subsurface scattering, 8k, photorealistic"
+        "ultra-realistic photographic portrait, 85mm lens, shallow depth of field, soft natural lighting, high dynamic range, "
+        "detailed skin texture, cinematic color grading, volumetric light, subsurface scattering, 8k, photorealistic, "
+        "upper body, centered composition, looking at camera, neutral studio background"
+    )
+
+    disallow = (
+        "no text, no watermark, no logo, no fruit, no cherries, no palace, no castle, no building, no landscape, "
+        "no extra limbs, no distortion, no deformed face, no out of frame"
     )
 
     attributes = ", ".join(details) if details else ""
-    enhanced = f"{base}. {attributes}. {guide}. head-and-shoulders composition, looking at camera"
+    enhanced = f"{subj_prefix}, {base}. {attributes}. {guide}. {disallow}"
     return " ".join(enhanced.split())
+
+
+def prompt_seed(text: str) -> int:
+    # Deterministic seed from text within 32-bit range
+    return int(sha256(text.encode("utf-8")).hexdigest()[:8], 16)
 
 
 def generate_with_stability(enhanced_prompt: str, width: int = 768, height: int = 1024) -> Optional[str]:
@@ -121,18 +161,25 @@ def generate_with_stability(enhanced_prompt: str, width: int = 768, height: int 
             "Accept": "application/json",
             "Content-Type": "application/json",
         }
+        negative = (
+            "low quality, blurry, distorted, deformed, extra fingers, watermark, text, logo, nsfw, nude, child, minor, kid, toddler, baby, "
+            "cartoon, illustration, painting, 3d render, landscape, palace, castle, fruit, cherries, bad anatomy, duplicate"
+        )
+        seed = prompt_seed(enhanced_prompt)
         payload = {
             "text_prompts": [
                 {"text": enhanced_prompt, "weight": 1.0},
-                {"text": "low quality, blurry, distorted, deformed, extra fingers, watermark, text", "weight": -1.2},
+                {"text": negative, "weight": -1.4},
             ],
-            "cfg_scale": 7,
+            "cfg_scale": 8,
             "clip_guidance_preset": "FAST_BLUE",
             "sampler": "K_DPM_2_ANCESTRAL",
             "samples": 1,
-            "steps": 35,
+            "steps": 40,
             "width": width,
             "height": height,
+            "seed": seed,
+            "style_preset": "photographic",
         }
         resp = requests.post(url, headers=headers, json=payload, timeout=60)
         if resp.status_code != 200:
