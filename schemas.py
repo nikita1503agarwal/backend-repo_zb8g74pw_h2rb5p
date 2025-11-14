@@ -41,8 +41,15 @@ class Product(BaseModel):
 # Add your own schemas here:
 # --------------------------------------------------
 
-# Note: The Flames database viewer will automatically:
-# 1. Read these schemas from GET /schema endpoint
-# 2. Use them for document validation when creating/editing
-# 3. Handle all database operations (CRUD) directly
-# 4. You don't need to create any database endpoints!
+class Generation(BaseModel):
+    """
+    Stores each image generation request and result.
+    Collection name: "generation"
+    """
+    prompt: str = Field(..., description="Original prompt from the user")
+    enhanced_prompt: str = Field(..., description="Enhanced prompt used for generation")
+    age: Optional[str] = Field(None, description="Perceived age group or exact age")
+    skin_tone: Optional[str] = Field(None, description="Skin tone descriptor")
+    eye_color: Optional[str] = Field(None, description="Eye color")
+    nationality: Optional[str] = Field(None, description="Country/ethnicity style like Australian, Korean, Arab")
+    image_url: str = Field(..., description="URL of the generated image")
